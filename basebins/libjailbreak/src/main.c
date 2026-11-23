@@ -1,4 +1,5 @@
 #include "common.h"
+#include <mach/mach.h>
 
 static jb_connection_t jb_connection = NULL;
 static uint32_t ios_version = -1;

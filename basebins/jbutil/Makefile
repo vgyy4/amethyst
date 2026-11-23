@@ -5,7 +5,7 @@ OBJCOPY = $(shell which llvm-objcopy)
 LDID = $(shell which ldid)
 
 CFLAGS := -I./include -isysroot $(SDK) -mios-version-min=12.0 -arch arm64e -arch arm64 \
-	-Werror -Wall -Wno-unused-variable -Wno-unused-function -fvisibility=hidden -fvisibility-inlines-hidden
+	-Werror -Wno-error=implicit-function-declaration -Wall -Wno-unused-variable -Wno-unused-function -fvisibility=hidden -fvisibility-inlines-hidden
 LDFLAGS := -L$(SDK)/usr/lib -lc -lSystem -lmis -lcompression -framework CoreFoundation
 
 SRC = $(wildcard src/*.c) $(wildcard src/*.s)
