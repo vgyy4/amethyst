@@ -206,7 +206,105 @@ void run_as_mobile(void (^action)(void)) {
     }
 }
 
+/* ---- checkra1n -> Amethyst migration support (added feature) ---------------
+ *
+ * These helpers let Amethyst adopt an existing checkra1n jailbreak instead of
+ * running its own kernel exploit. They only run when JB_FLAG_MIGRATE_CHECKRA1N
+ * is set (i.e. the user pressed the "Migrate from checkra1n" button).
+ *
+ * All kernel access here is read-only; the destructive work afterwards is done
+ * entirely by Amethyst's existing, shipping jailbreak pipeline.
+ */
+#include <mach/vm_region.h>
+
+/* Private MIG routine: returns the kernel address (kobject) backing a mach port. */
+extern kern_return_t mach_port_kobject(ipc_space_t task, mach_port_name_t name,
+                                       natural_t *object_type, mach_vm_address_t *object_addr);
+
+/* Static (unslid) kernelcache base for A7-A11 on iOS 12/13. iPad mini 2 is A7. */
+#define MIGRATE_UNSLID_KBASE 0xFFFFFFF007004000ULL
+
+static bool is_kernel_ptr(uint64_t p) {
+    /* arm64 kernel VAs on these SoCs live at/above 0xffffffe000000000. */
+    return p >= 0xFFFFFFE000000000ULL;
+}
+
+/* Walk mapped kernel regions upward and return the first one that begins with a
+ * 64-bit Mach-O magic -- that is the live (slid) kernelcache header. Read-only:
+ * we only kread32 addresses the kernel itself reported as mapped. */
+static uint64_t migrate_find_kernel_base(void) {
+    uint64_t addr = 0xFFFFFFF000000000ULL;
+    for (int i = 0; i < 8192; i++) {
+        uint64_t size = 0;
+        uint64_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        vm_region_basic_info_data_64_t info = {0};
+        mach_port_t object = MACH_PORT_NULL;
+
+        kern_return_t kr = mach_vm_region(kinfo->tfp0, &addr, &size, VM_REGION_BASIC_INFO_64,
+                                          &info, &cnt, &object);
+        if (kr != KERN_SUCCESS || size == 0) break;
+        if (kread32(addr) == MH_MAGIC_64) return addr;
+        addr += size;
+    }
+    return 0;
+}
+
+int checkra1n_handoff(void) {
+    /* 1) Grab checkra1n's kernel task port. */
+    mach_port_t tfp0 = MACH_PORT_NULL;
+    host_get_special_port(mach_host_self(), HOST_LOCAL_NODE, 4, &tfp0);
+    if (!MACH_PORT_VALID(tfp0)) task_for_pid(mach_task_self(), 0, &tfp0);
+    if (!MACH_PORT_VALID(tfp0)) {
+        ProgressLog(0.15f, "No kernel task port (is checkra1n applied?)");
+        return -1;
+    }
+    kinfo->tfp0 = tfp0; /* kread/kwrite use kinfo->tfp0 from here on */
+
+    /* 2) kernel_task address = kobject backing tfp0. */
+    natural_t type = 0;
+    mach_vm_address_t kobj = 0;
+    if (mach_port_kobject(mach_task_self(), tfp0, &type, &kobj) != KERN_SUCCESS || !is_kernel_ptr(kobj)) {
+        ProgressLog(0.15f, "kobject lookup failed");
+        return -1;
+    }
+    kinfo->kern_task_addr = kobj;
+    kinfo->kern_proc_addr = kread64(kinfo->kern_task_addr + koffsetof(task, bsd_info));
+    if (!is_kernel_ptr(kinfo->kern_proc_addr)) return -1;
+    kinfo->ipc_space_kernel = kread64(kinfo->kern_task_addr + koffsetof(task, itk_space));
+
+    /* 3) our own task/proc, by walking the kernel task list from kern_task. */
+    kinfo->self_task_addr = find_task_for_pid(getpid());
+    kinfo->self_proc_addr = find_proc_for_pid(getpid());
+    if (!is_kernel_ptr(kinfo->self_task_addr) || !is_kernel_ptr(kinfo->self_proc_addr)) return -1;
+
+    /* 4) realhost + port addresses (best effort; used by the host_priv trick). */
+    natural_t htype = 0;
+    mach_vm_address_t hobj = 0;
+    if (mach_port_kobject(mach_task_self(), mach_host_self(), &htype, &hobj) == KERN_SUCCESS && is_kernel_ptr(hobj)) {
+        kinfo->realhost_addr = hobj;
+    }
+    kinfo->host_port_addr = find_ipc_port(mach_host_self());
+    kinfo->self_port_addr = find_ipc_port(mach_task_self());
+
+    /* 5) kernel base + slide. */
+    kinfo->kernel_base = migrate_find_kernel_base();
+    if (kinfo->kernel_base == 0 || kread32(kinfo->kernel_base) != MH_MAGIC_64) {
+        if (kread32(MIGRATE_UNSLID_KBASE) == MH_MAGIC_64) kinfo->kernel_base = MIGRATE_UNSLID_KBASE;
+    }
+    if (kinfo->kernel_base == 0) {
+        ProgressLog(0.15f, "kernel base not found");
+        return -1;
+    }
+    kinfo->kernel_slide = kinfo->kernel_base - MIGRATE_UNSLID_KBASE;
+    return 0;
+}
+/* --------------------------------------------------------------------------- */
+
 static int run_exploit(uint32_t flags) {
+    if (flags & JB_FLAG_MIGRATE_CHECKRA1N) {
+        ProgressLog(0.15f, "Adopting checkra1n kernel access");
+        return checkra1n_handoff();
+    }
     if (MACH_PORT_VALID(kinfo->tfp0)) return 0;
     if (flags & JB_FLAG_EXPLOIT_TRIGON) {
         int err = run_trigon();
@@ -304,6 +402,34 @@ static int run_kpf(void) {
 err:
     kpf_deinit();
     return -1;
+}
+
+/* Read-only dry run: prove we can derive valid kernel state from checkra1n and
+ * that Amethyst's patchfinder resolves against it, WITHOUT changing anything. */
+jb_error_t validate_checkra1n_migration(void) {
+    ProgressLog(0.1f, "Validating checkra1n access");
+    if (init_device() != 0) return JB_ERROR_UNKNOWN;
+    if (checkra1n_handoff() != 0) return JB_ERROR_EXPLOIT;
+
+    printf("[migrate] tfp0=0x%x kbase=0x%llx slide=0x%llx\n",
+           kinfo->tfp0, kinfo->kernel_base, kinfo->kernel_slide);
+    printf("[migrate] kern_task=0x%llx kern_proc=0x%llx self_task=0x%llx self_proc=0x%llx\n",
+           kinfo->kern_task_addr, kinfo->kern_proc_addr, kinfo->self_task_addr, kinfo->self_proc_addr);
+    printf("[migrate] realhost=0x%llx ipc_space_kernel=0x%llx\n",
+           kinfo->realhost_addr, kinfo->ipc_space_kernel);
+
+    /* The proc we found for ourselves must actually report our pid. */
+    uint32_t pid = kread32(kinfo->self_proc_addr + koffsetof(proc, pid));
+    if (pid != (uint32_t)getpid()) {
+        printf("[migrate] self pid mismatch: got %u want %d\n", pid, getpid());
+        return JB_ERROR_PERMISSION;
+    }
+
+    /* Patchfinder is read-only and exercises every offset we rely on. */
+    if (run_kpf() != 0) return JB_ERROR_PATCHFINDER;
+
+    ProgressLog(0.3f, "Validated");
+    return JB_ERROR_SUCCESS;
 }
 
 jb_error_t run_jailbreak(uint32_t flags, char *generator) {

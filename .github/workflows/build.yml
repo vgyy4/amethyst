@@ -1,0 +1,54 @@
+name: Build Amethyst IPA
+
+# Builds an unsigned Amethyst.ipa (with the checkra1n migration feature) on a
+# macOS runner and uploads it as a workflow artifact. Run it from the Actions
+# tab (workflow_dispatch) or on every push.
+
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build unsigned IPA
+        working-directory: Amethyst
+        run: |
+          set -euo pipefail
+          rm -rf ./build
+          xcodebuild clean build \
+            -project Amethyst.xcodeproj \
+            -scheme Amethyst \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ./build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+
+          APP="build/Build/Products/Release-iphoneos/Amethyst.app"
+          test -d "$APP"
+          strip "$APP/Amethyst" || true
+          ldid -S "$APP/Amethyst"
+
+          rm -rf Payload Amethyst.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload Amethyst.ipa
+          ls -lh Amethyst.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amethyst-ipa
+          path: Amethyst/Amethyst.ipa
+          if-no-files-found: error

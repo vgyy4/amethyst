@@ -15,6 +15,7 @@
 #define JB_FLAG_INSTALL_SILEO       0x00000010
 #define JB_FLAG_INSTALL_ZEBRA       0x00000020
 #define JB_FLAG_INSTALL_LIBSWIFT    0x00000040
+#define JB_FLAG_MIGRATE_CHECKRA1N   0x00000080
 
 #define koffsetof(struct, entry) kinfo->offsets.struct.entry
 
@@ -199,5 +200,19 @@ extern int trigon_cache_set_bool(char *key, bool value);
 extern void trigon_cache_sync(void);
 
 jb_error_t run_jailbreak(uint32_t flags, char *generator);
+
+/*
+ * checkra1n -> Amethyst migration (added feature).
+ *
+ * checkra1n_handoff() reuses checkra1n's existing kernel task port (host special
+ * port 4) to populate `kinfo` instead of running Amethyst's own kernel exploit,
+ * which would be unsafe on a kernel checkra1n has already exploited/patched.
+ *
+ * validate_checkra1n_migration() performs the handoff plus Amethyst's read-only
+ * patchfinder and logs every derived value. It writes NOTHING to the kernel or
+ * disk, so it is safe to run first to confirm correctness before migrating.
+ */
+int checkra1n_handoff(void);
+jb_error_t validate_checkra1n_migration(void);
 
 #endif /* jailbreak_h */

@@ -86,6 +86,8 @@
 @property (nonatomic, strong) UIActivityIndicatorView *statusIndicator;
 @property (nonatomic, assign) bool hideStatusBar;
 @property (nonatomic, assign) int isJailbroken;
+@property (nonatomic, assign) bool isForeignJailbreak;
+@property (nonatomic, assign) NSUInteger extraJBFlags;
 @property (nonatomic, strong) CreditsController *creditsTable;
 @property (nonatomic, strong) PopupOption *exploitOption;
 @property (nonatomic, strong) PopupOption *toggleOption;

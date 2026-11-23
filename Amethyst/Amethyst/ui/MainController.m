@@ -91,6 +91,14 @@ int run_binary(char *path, char **args, char **env, bool wait, bool root);
         return false;
         
 jailbroken:
+        if (access("/.installed_amethyst", F_OK) != 0) {
+            /* A jailbreak is active but it is NOT Amethyst (e.g. checkra1n).
+             * Report "not jailbroken" so the normal install UI and action button
+             * stay active, but remember it so the button offers to migrate. */
+            self.isForeignJailbreak = true;
+            self.isJailbroken = 0;
+            return false;
+        }
         self.isJailbroken = 1;
         jbserver_post_jailbreak(false, false);
         return true;
@@ -231,6 +239,10 @@ jailbroken:
         self.jailbreakCardButton.optionButton.alpha = 0.6f;
         self.jailbreakCardButton.optionButton.enabled = NO;
         [self.progressRing setProgressPercent:0 label:@"Jailbroken"];
+    } else if (self.isForeignJailbreak) {
+        /* checkra1n (or another non-Amethyst jailbreak) is active: offer migration. */
+        [self.jailbreakCardButton setTitle:@"Migrate from checkra1n"];
+        [self.progressRing setProgressPercent:0 label:@"checkra1n"];
     }
     
     self.creditsPopupCard = [[PopupCard alloc] init:@"Credits" withViews:@[
@@ -457,6 +469,11 @@ jailbroken:
 }
 
 - (void)jailbreakButtonAction {
+    if (self.isForeignJailbreak) { [self migrateButtonAction]; return; }
+    [self runJailbreakFlow];
+}
+
+- (void)runJailbreakFlow {
     [self.progressRing showRing];
     self.jailbreakCardButton.optionButton.enabled = false;
     self.creditsCardButton.optionButton.enabled = false;
@@ -478,7 +495,8 @@ jailbroken:
     amethyst.restoreRootfs = [self.restoreRootFSOption getSwitchValue];
     amethyst.enableTweaks = [self.enableTweaksOption getSwitchValue];
     uint32_t flags = JB_FLAG_NONE;
-    
+    flags |= (uint32_t)self.extraJBFlags; /* carries JB_FLAG_MIGRATE_CHECKRA1N when migrating */
+
     if (amethyst.restoreRootfs) flags |= JB_FLAG_RESTORE_ROOTFS;
     if (amethyst.enableTweaks) flags |= JB_FLAG_ENABLE_TWEAKS;
     if (amethyst.exploit == Exploit_Hemlock) {
@@ -543,6 +561,73 @@ jailbroken:
     });
 }
 
+- (void)migrateButtonAction {
+    /* Step 1: validate (read-only). Step 2: show derived kernel state and ask to
+     * confirm. Step 3: on confirm, run the normal pipeline with the migrate flag. */
+    self.extraJBFlags = JB_FLAG_MIGRATE_CHECKRA1N;
+
+    [self.progressRing showRing];
+    self.jailbreakCardButton.optionButton.enabled = false;
+    self.creditsCardButton.optionButton.enabled = false;
+    self.settingsCardButton.optionButton.enabled = false;
+
+    [UIView transitionWithView:self.jailbreakCardButton.optionButton duration:0.2f
+        options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+        [self.jailbreakCardButton.optionButton setTitleColor:[UIColor clearColor] forState:UIControlStateNormal];
+    } completion:^(BOOL finished){
+        [self.statusIndicator startAnimating];
+    }];
+    [UIView animateWithDuration:0.4 animations:^{
+        self.statusIndicator.alpha = 1.0f;
+        self.creditsCardButton.optionButton.alpha = 0.35f;
+        self.settingsCardButton.optionButton.alpha = 0.35f;
+    }];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        jb_error_t verr = validate_checkra1n_migration();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.jailbreakCardButton.optionButton.enabled = true;
+            self.creditsCardButton.optionButton.enabled = true;
+            self.settingsCardButton.optionButton.enabled = true;
+
+            [UIView animateWithDuration:0.4 animations:^{
+                self.statusIndicator.alpha = 0.0f;
+                self.creditsCardButton.optionButton.alpha = 1.0f;
+                self.settingsCardButton.optionButton.alpha = 1.0f;
+            } completion:^(BOOL finished){ if (finished) [self.statusIndicator stopAnimating]; }];
+            [UIView transitionWithView:self.jailbreakCardButton.optionButton duration:0.4f
+                options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+                [self.jailbreakCardButton.optionButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            } completion:^(BOOL finished){ }];
+
+            if (verr != JB_ERROR_SUCCESS) {
+                [self.progressRing setProgressPercent:1.0f label:@"Failed"];
+                alertCallback = ^(){};
+                [self.alert setText:@"Validation Failed"
+                    message:@"Amethyst could not safely read the kernel through checkra1n. Do NOT proceed. Make sure checkra1n is fully applied (jailbroken, not just booted), then reopen Amethyst and try again."
+                    button:@"Okay"];
+                [self.alert setAction:self _sel:@selector(alertHandler)];
+                [self.alert openAlert];
+                return;
+            }
+
+            [self.progressRing hideRing];
+            NSString *restoreNote = [self.restoreRootFSOption getSwitchValue]
+                ? @"RootFS will be restored first (checkra1n's changes wiped), then Amethyst installed fresh."
+                : @"checkra1n's bootstrap will be adopted as Amethyst (no RootFS wipe).";
+            NSString *msg = [NSString stringWithFormat:
+                @"Kernel access via checkra1n validated.\n\n%@\n\nThe device will userspace-reboot into Amethyst when done. Back up first. Proceed?", restoreNote];
+
+            alertCallback = ^() {
+                dispatch_async(dispatch_get_main_queue(), ^{ [self runJailbreakFlow]; });
+            };
+            [self.alert setText:@"Ready to Migrate" message:msg button:@"Migrate"];
+            [self.alert setAction:self _sel:@selector(alertHandler)];
+            [self.alert openAlert];
+        });
+    });
+}
+
 - (void)closeAllCards:(UITapGestureRecognizer *)recognizer {
     if ([self.creditsPopupCard isOpen]) {
         [self.creditsPopupCard closeCard];
@@ -569,9 +654,9 @@ jailbroken:
         }
     } else {
         if (![self deviceJailbroken]) {
-            [self.jailbreakCardButton setTitle:@"Jailbreak"];
+            [self.jailbreakCardButton setTitle:self.isForeignJailbreak ? @"Migrate from checkra1n" : @"Jailbreak"];
         }
-        
+
         if (![self deviceSupported]) {
             [self.jailbreakCardButton setTitle:@"Unsupported"];
         }
