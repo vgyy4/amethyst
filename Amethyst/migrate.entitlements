@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Entitlements for the checkra1n-migration build of Amethyst.
+
+	  This IPA is ONLY ever installed unsigned, via AppSyncUnified, on a device that
+	  is ALREADY jailbroken (checkra1n). Under such a device amfid is patched, so the
+	  ad-hoc signature's entitlements are honored. Without these, the app runs fully
+	  sandboxed and cannot reuse checkra1n's kernel task port (host special port 4 /
+	  task_for_pid(0)) — which is what "could not borrow checkra1n's kernel task port"
+	  was. This mirrors the kernel-access entitlements the project's own jbutil helper
+	  is signed with (basebins/jbutil/ents.xml).
+
+	  Do NOT install this build on a non-jailbroken device with a real certificate:
+	  iOS will refuse to launch an app claiming these private entitlements.
+	-->
+	<key>platform-application</key>
+	<true/>
+	<key>task_for_pid-allow</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+	<key>com.apple.system-task-ports</key>
+	<true/>
+	<key>com.apple.system-task-ports.control</key>
+	<true/>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>com.apple.private.skip-library-validation</key>
+	<true/>
+	<key>com.apple.security.exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/</string>
+	</array>
+	<key>com.apple.private.xpc.launchd.userspace-reboot</key>
+	<true/>
+	<key>com.apple.private.xpc.launchd.reboot</key>
+	<true/>
+</dict>
+</plist>
