@@ -14,6 +14,11 @@ int run_jbutil(char *cmd, char *arg, bool wait);
 extern int sandbox_check(pid_t pid, const char *operation, uint32_t type, ...);
 extern int csops(pid_t pid, unsigned int  ops, void *useraddr, size_t usersize);
 int run_binary(char *path, char **args, char **env, bool wait, bool root);
+/* canonical on-disk bootstrap checks (jailbreak/install.c) — kernel-independent,
+ * so they work even from a sandboxed AppSync'd app that can't touch the kernel. */
+extern bool is_bootstrap_installed(void);
+extern bool is_procursus_installed(void);
+extern bool is_amethyst_installed(void);
 
 @implementation MainController
 - (bool)prefersStatusBarHidden {
@@ -87,9 +92,19 @@ int run_binary(char *path, char **args, char **env, bool wait, bool root);
             }
         }
         
+        /* Last-resort, kernel-independent check: a dpkg/apt bootstrap on disk means
+         * a jailbreak IS installed (e.g. checkra1n 0.12.4 / bingner+Cydia), even if
+         * none of the live kernel/sandbox probes above fired from this sandboxed,
+         * AppSync-installed app. Recognize it so the button offers migration and can
+         * NEVER fall through to the normal "Jailbreak" button — running Amethyst's
+         * own exploit over checkra1n's already-exploited kernel would likely panic. */
+        if (is_bootstrap_installed() && !is_amethyst_installed()) {
+            goto jailbroken;
+        }
+
         self.isJailbroken = 0;
         return false;
-        
+
 jailbroken:
         if (access("/.installed_amethyst", F_OK) != 0) {
             /* A jailbreak is active but it is NOT Amethyst (e.g. checkra1n).
@@ -603,20 +618,45 @@ jailbroken:
             if (verr != JB_ERROR_SUCCESS) {
                 [self.progressRing setProgressPercent:1.0f label:@"Failed"];
                 alertCallback = ^(){};
-                [self.alert setText:@"Validation Failed"
-                    message:@"Amethyst could not safely read the kernel through checkra1n. Do NOT proceed. Make sure checkra1n is fully applied (jailbroken, not just booted), then reopen Amethyst and try again."
-                    button:@"Okay"];
+                NSString *vmsg;
+                switch (verr) {
+                    case JB_ERROR_EXPLOIT:
+                        /* checkra1n_handoff() could not obtain a kernel task port. */
+                        vmsg = @"Amethyst could not borrow checkra1n's kernel task port.\n\nThis app was installed via AppSync, which fakes the signature but grants no entitlements, so a sandboxed app may not be allowed to reuse checkra1n's kernel access. (Or checkra1n is only booted, not fully jailbroken.)\n\nMigration cannot proceed. Nothing was changed.";
+                        break;
+                    case JB_ERROR_PATCHFINDER:
+                        vmsg = @"Kernel access was obtained, but Amethyst could not resolve the required kernel offsets for this device. Do NOT proceed. Nothing was changed.";
+                        break;
+                    case JB_ERROR_PERMISSION:
+                        vmsg = @"Kernel access was obtained but failed a self-consistency check (pid mismatch). Do NOT proceed. Nothing was changed.";
+                        break;
+                    default:
+                        vmsg = @"Amethyst could not validate kernel access through checkra1n. Do NOT proceed. Make sure checkra1n is fully applied, then reopen Amethyst and try again. Nothing was changed.";
+                        break;
+                }
+                [self.alert setText:@"Validation Failed" message:vmsg button:@"Okay"];
                 [self.alert setAction:self _sel:@selector(alertHandler)];
                 [self.alert openAlert];
                 return;
             }
 
             [self.progressRing hideRing];
-            NSString *restoreNote = [self.restoreRootFSOption getSwitchValue]
-                ? @"RootFS will be restored first (checkra1n's changes wiped), then Amethyst installed fresh."
-                : @"checkra1n's bootstrap will be adopted as Amethyst (no RootFS wipe).";
+            /* checkra1n 0.12.4 uses the bingner/Substrate bootstrap (Cydia), NOT
+             * Procursus. Amethyst can only *adopt* a Procursus bootstrap in place;
+             * any other bootstrap must be wiped (Restore RootFS) and replaced with a
+             * fresh Amethyst/Procursus bootstrap. Force the wipe when the active
+             * bootstrap isn't Procursus, otherwise run_jailbreak() aborts mid-way
+             * with JB_ERROR_UNSUPPORTED_INSTALL. */
+            BOOL forceWipe = !is_procursus_installed();
+            NSString *restoreNote;
+            if (forceWipe) {
+                self.extraJBFlags |= JB_FLAG_RESTORE_ROOTFS;
+                restoreNote = @"⚠️ The active jailbreak (checkra1n) is NOT Procursus, so its bootstrap cannot be adopted.\n\nRootFS will be RESTORED — checkra1n, Cydia, and every tweak/package you installed through it will be WIPED — and a fresh Amethyst bootstrap installed in their place. This is destructive and not reversible without a backup. You will re-add tweaks from Sileo afterward.";
+            } else {
+                restoreNote = @"The active bootstrap is Procursus and will be adopted as Amethyst (no RootFS wipe).";
+            }
             NSString *msg = [NSString stringWithFormat:
-                @"Kernel access via checkra1n validated.\n\n%@\n\nThe device will userspace-reboot into Amethyst when done. Back up first. Proceed?", restoreNote];
+                @"Kernel access via checkra1n validated.\n\n%@\n\nThe device will userspace-reboot into Amethyst when done. Test ONE device first and back up. Proceed?", restoreNote];
 
             alertCallback = ^() {
                 dispatch_async(dispatch_get_main_queue(), ^{ [self runJailbreakFlow]; });
