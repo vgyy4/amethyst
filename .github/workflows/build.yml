@@ -10,6 +10,35 @@ on:
   workflow_dispatch:
 
 jobs:
+  probe:
+    # Fast, independent job: builds the read-only checkra1n kernel-access probe
+    # (migrator/tfp0probe). Only needs clang + ldid, so it finishes quickly even
+    # when the heavy IPA build is stuck in the macOS runner queue.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+      - name: Install ldid
+        run: brew install ldid
+      - name: Build tfp0 probe
+        working-directory: migrator/tfp0probe
+        run: |
+          set -euo pipefail
+          make
+          test -f tfp0probe
+          echo "=== entitlements ===" && ldid -e tfp0probe | head -20
+          file tfp0probe
+      - name: Upload probe + connect script
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfp0probe
+          path: |
+            migrator/tfp0probe/tfp0probe
+            migrator/connect.sh
+          if-no-files-found: error
+
   build:
     runs-on: macos-latest
     steps:
